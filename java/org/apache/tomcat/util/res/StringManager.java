@@ -17,13 +17,7 @@
 package org.apache.tomcat.util.res;
 
 import java.text.MessageFormat;
-import java.util.Enumeration;
-import java.util.Hashtable;
-import java.util.LinkedHashMap;
-import java.util.Locale;
-import java.util.Map;
-import java.util.MissingResourceException;
-import java.util.ResourceBundle;
+import java.util.*;
 
 /**
  * An internationalization / localization helper class which reduces
@@ -60,6 +54,10 @@ public class StringManager {
     private final Locale locale;
 
 
+    private static final Map<String, Map<Locale, StringManager>> managers =
+        new Hashtable<>();
+
+
     /**
      * Creates a new StringManager for a given package. This is a
      * private method and all access to it is arbitrated by the
@@ -79,7 +77,8 @@ public class StringManager {
             if (locale.getLanguage().equals(Locale.ENGLISH.getLanguage())) {
                 locale = Locale.ROOT;
             }
-            bnd = ResourceBundle.getBundle(bundleName, locale);
+//            bnd = ResourceBundle.getBundle(bundleName, locale);
+            bnd = ResourceBundle.getBundle(bundleName, locale, new UTF8Control());
         } catch (MissingResourceException ex) {
             // Try from the current loader (that's the case for trusted apps)
             // Should only be required if using a TC5 style classloader structure
@@ -87,7 +86,8 @@ public class StringManager {
             ClassLoader cl = Thread.currentThread().getContextClassLoader();
             if (cl != null) {
                 try {
-                    bnd = ResourceBundle.getBundle(bundleName, locale, cl);
+//                    bnd = ResourceBundle.getBundle(bundleName, locale, cl);
+                    bnd = ResourceBundle.getBundle(bundleName, locale, cl, new UTF8Control());
                 } catch (MissingResourceException ex2) {
                     // Ignore
                 }
@@ -107,20 +107,128 @@ public class StringManager {
         }
     }
 
+    /**
+     * Get the StringManager for a particular package and Locale. If a manager
+     * for a package/Locale combination already exists, it will be reused, else
+     * a new StringManager will be created and returned.
+     *
+     * @param packageName The package name
+     * @param locale      The Locale
+     *
+     * @return The instance associated with the given package and Locale
+     */
+    public static final synchronized StringManager getManager(
+        String packageName, Locale locale) {
+
+        Map<Locale, StringManager> map = managers.get(packageName);
+        if (map == null) {
+            /*
+             * Don't want the HashMap to be expanded beyond LOCALE_CACHE_SIZE.
+             * Expansion occurs when size() exceeds capacity. Therefore keep
+             * size at or below capacity.
+             * removeEldestEntry() executes after insertion therefore the test
+             * for removal needs to use one less than the maximum desired size
+             *
+             */
+            map = new LinkedHashMap<Locale, StringManager>(LOCALE_CACHE_SIZE, 1, true) {
+                private static final long serialVersionUID = 1L;
+
+                @Override
+                protected boolean removeEldestEntry(
+                    Map.Entry<Locale, StringManager> eldest) {
+                    if (size() > (LOCALE_CACHE_SIZE - 1)) {
+                        return true;
+                    }
+                    return false;
+                }
+            };
+            managers.put(packageName, map);
+        }
+
+        StringManager mgr = map.get(locale);
+        if (mgr == null) {
+            mgr = new StringManager(packageName, locale);
+            map.put(locale, mgr);
+        }
+        return mgr;
+    }
+
+
+    /**
+     * Identify the Locale this StringManager is associated with.
+     *
+     * @return The Locale associated with the StringManager
+     */
+    public Locale getLocale() {
+        return locale;
+    }
+
+
+    // --------------------------------------------------------------
+    // STATIC SUPPORT METHODS
+    // --------------------------------------------------------------
+
+    /**
+     * Retrieve the StringManager for a list of Locales. The first StringManager
+     * found will be returned.
+     *
+     * @param packageName      The package for which the StringManager was
+     *                         requested
+     * @param requestedLocales The list of Locales
+     * @return the found StringManager or the default StringManager
+     */
+    public static StringManager getManager(String packageName,
+                                           Enumeration<Locale> requestedLocales) {
+        while (requestedLocales.hasMoreElements()) {
+            Locale locale = requestedLocales.nextElement();
+            StringManager result = getManager(packageName, locale);
+            if (result.getLocale().equals(locale)) {
+                return result;
+            }
+        }
+        // Return the default
+        return getManager(packageName);
+    }
+
+
+    /**
+     * Get the StringManager for a given class. The StringManager will be
+     * returned for the package in which the class is located. If a manager for
+     * that package already exists, it will be reused, else a new
+     * StringManager will be created and returned.
+     *
+     * @param clazz The class for which to retrieve the StringManager
+     * @return The instance associated with the package of the provide class
+     */
+    public static final StringManager getManager(Class<?> clazz) {
+        return getManager(clazz.getPackage().getName());
+    }
+
+
+    /**
+     * Get the StringManager for a particular package. If a manager for
+     * a package already exists, it will be reused, else a new
+     * StringManager will be created and returned.
+     *
+     * @param packageName The package name
+     * @return The instance associated with the given package and the default
+     * Locale
+     */
+    public static final StringManager getManager(String packageName) {
+        return getManager(packageName, Locale.getDefault());
+    }
 
     /**
      * Get a string from the underlying resource bundle or return null if the
      * String is not found.
      *
      * @param key to desired resource String
-     *
      * @return resource String matching <i>key</i> from underlying bundle or
-     *         null if not found.
-     *
+     * null if not found.
      * @throws IllegalArgumentException if <i>key</i> is null
      */
     public String getString(String key) {
-        if (key == null){
+        if (key == null) {
             String msg = "key may not have a null value";
             throw new IllegalArgumentException(msg);
         }
@@ -150,16 +258,14 @@ public class StringManager {
         return str;
     }
 
-
     /**
      * Get a string from the underlying resource bundle and format
      * it with the given set of arguments.
      *
      * @param key  The key for the required message
      * @param args The values to insert into the message
-     *
      * @return The request string formatted with the provided arguments or the
-     *         key if the key was not found.
+     * key if the key was not found.
      */
     public String getString(final String key, final Object... args) {
         String value = getString(key);
@@ -167,126 +273,9 @@ public class StringManager {
             value = key;
         }
 
+
         MessageFormat mf = new MessageFormat(value);
         mf.setLocale(locale);
         return mf.format(args, new StringBuffer(), null).toString();
-    }
-
-
-    /**
-     * Identify the Locale this StringManager is associated with.
-     *
-     * @return The Locale associated with the StringManager
-     */
-    public Locale getLocale() {
-        return locale;
-    }
-
-
-    // --------------------------------------------------------------
-    // STATIC SUPPORT METHODS
-    // --------------------------------------------------------------
-
-    private static final Map<String, Map<Locale,StringManager>> managers =
-            new Hashtable<>();
-
-
-    /**
-     * Get the StringManager for a given class. The StringManager will be
-     * returned for the package in which the class is located. If a manager for
-     * that package already exists, it will be reused, else a new
-     * StringManager will be created and returned.
-     *
-     * @param clazz The class for which to retrieve the StringManager
-     *
-     * @return The instance associated with the package of the provide class
-     */
-    public static final StringManager getManager(Class<?> clazz) {
-        return getManager(clazz.getPackage().getName());
-    }
-
-
-    /**
-     * Get the StringManager for a particular package. If a manager for
-     * a package already exists, it will be reused, else a new
-     * StringManager will be created and returned.
-     *
-     * @param packageName The package name
-     *
-     * @return The instance associated with the given package and the default
-     *         Locale
-     */
-    public static final StringManager getManager(String packageName) {
-        return getManager(packageName, Locale.getDefault());
-    }
-
-
-    /**
-     * Get the StringManager for a particular package and Locale. If a manager
-     * for a package/Locale combination already exists, it will be reused, else
-     * a new StringManager will be created and returned.
-     *
-     * @param packageName The package name
-     * @param locale      The Locale
-     *
-     * @return The instance associated with the given package and Locale
-     */
-    public static final synchronized StringManager getManager(
-            String packageName, Locale locale) {
-
-        Map<Locale,StringManager> map = managers.get(packageName);
-        if (map == null) {
-            /*
-             * Don't want the HashMap to be expanded beyond LOCALE_CACHE_SIZE.
-             * Expansion occurs when size() exceeds capacity. Therefore keep
-             * size at or below capacity.
-             * removeEldestEntry() executes after insertion therefore the test
-             * for removal needs to use one less than the maximum desired size
-             *
-             */
-            map = new LinkedHashMap<Locale,StringManager>(LOCALE_CACHE_SIZE, 1, true) {
-                private static final long serialVersionUID = 1L;
-                @Override
-                protected boolean removeEldestEntry(
-                        Map.Entry<Locale,StringManager> eldest) {
-                    if (size() > (LOCALE_CACHE_SIZE - 1)) {
-                        return true;
-                    }
-                    return false;
-                }
-            };
-            managers.put(packageName, map);
-        }
-
-        StringManager mgr = map.get(locale);
-        if (mgr == null) {
-            mgr = new StringManager(packageName, locale);
-            map.put(locale, mgr);
-        }
-        return mgr;
-    }
-
-
-    /**
-     * Retrieve the StringManager for a list of Locales. The first StringManager
-     * found will be returned.
-     *
-     * @param packageName      The package for which the StringManager was
-     *                         requested
-     * @param requestedLocales The list of Locales
-     *
-     * @return the found StringManager or the default StringManager
-     */
-    public static StringManager getManager(String packageName,
-            Enumeration<Locale> requestedLocales) {
-        while (requestedLocales.hasMoreElements()) {
-            Locale locale = requestedLocales.nextElement();
-            StringManager result = getManager(packageName, locale);
-            if (result.getLocale().equals(locale)) {
-                return result;
-            }
-        }
-        // Return the default
-        return getManager(packageName);
     }
 }

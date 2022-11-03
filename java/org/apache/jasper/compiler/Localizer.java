@@ -16,11 +16,13 @@
  */
 package org.apache.jasper.compiler;
 
+import org.apache.jasper.runtime.ExceptionUtils;
+import org.apache.tomcat.util.res.UTF8Control;
+
 import java.text.MessageFormat;
+import java.util.Locale;
 import java.util.MissingResourceException;
 import java.util.ResourceBundle;
-
-import org.apache.jasper.runtime.ExceptionUtils;
 
 /**
  * Class responsible for converting error codes to corresponding localized
@@ -34,7 +36,8 @@ public class Localizer {
 
     static {
         try {
-            bundle = ResourceBundle.getBundle("org.apache.jasper.resources.LocalStrings");
+//            bundle = ResourceBundle.getBundle("org.apache.jasper.resources.LocalStrings");
+            bundle = ResourceBundle.getBundle("org.apache.jasper.resources.LocalStrings", Locale.getDefault(), new UTF8Control());
         } catch (Throwable t) {
             ExceptionUtils.handleThrowable(t);
         }
@@ -81,6 +84,8 @@ public class Localizer {
             MessageFormat formatter = new MessageFormat(errMsg);
             errMsg = formatter.format(args);
         }
+
+//        errMsg = new String(errMsg.getBytes(StandardCharsets.ISO_8859_1), StandardCharsets.UTF_8);
 
         return errMsg;
     }
