@@ -16,18 +16,14 @@
  */
 package org.apache.catalina.util;
 
-import java.util.List;
-import java.util.concurrent.CopyOnWriteArrayList;
-
-import org.apache.catalina.Lifecycle;
-import org.apache.catalina.LifecycleEvent;
-import org.apache.catalina.LifecycleException;
-import org.apache.catalina.LifecycleListener;
-import org.apache.catalina.LifecycleState;
+import org.apache.catalina.*;
 import org.apache.juli.logging.Log;
 import org.apache.juli.logging.LogFactory;
 import org.apache.tomcat.util.ExceptionUtils;
 import org.apache.tomcat.util.res.StringManager;
+
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * Base implementation of the {@link Lifecycle} interface that implements the
@@ -127,15 +123,20 @@ public abstract class LifecycleBase implements Lifecycle {
 
     @Override
     public final synchronized void init() throws LifecycleException {
+        // 非 NEW 状态、不允许调用 init 方法
         if (!state.equals(LifecycleState.NEW)) {
             invalidTransition(Lifecycle.BEFORE_INIT_EVENT);
         }
 
         try {
+            // 初始化逻辑之前、先将状态变更为 INITIALIZING
             setStateInternal(LifecycleState.INITIALIZING, null, false);
+            // 抽象方法、子类实现
             initInternal();
+            // 初始化完成之后、状态变为 INITIALIZED
             setStateInternal(LifecycleState.INITIALIZED, null, false);
         } catch (Throwable t) {
+            // 状态设置为 FAILED
             handleSubClassException(t, "lifecycleBase.initFail", toString());
         }
     }
@@ -170,6 +171,7 @@ public abstract class LifecycleBase implements Lifecycle {
         }
 
         if (state.equals(LifecycleState.NEW)) {
+            // NEW 的话就执行 init
             init();
         } else if (state.equals(LifecycleState.FAILED)) {
             stop();
@@ -420,6 +422,7 @@ public abstract class LifecycleBase implements Lifecycle {
         this.state = state;
         String lifecycleEvent = state.getLifecycleEvent();
         if (lifecycleEvent != null) {
+            // 触发监听器
             fireLifecycleEvent(lifecycleEvent, data);
         }
     }

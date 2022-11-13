@@ -16,6 +16,12 @@
  */
 package org.apache.catalina.startup;
 
+import org.apache.catalina.security.SecurityClassLoad;
+import org.apache.catalina.startup.ClassLoaderFactory.Repository;
+import org.apache.catalina.startup.ClassLoaderFactory.RepositoryType;
+import org.apache.juli.logging.Log;
+import org.apache.juli.logging.LogFactory;
+
 import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
@@ -26,12 +32,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-
-import org.apache.catalina.security.SecurityClassLoad;
-import org.apache.catalina.startup.ClassLoaderFactory.Repository;
-import org.apache.catalina.startup.ClassLoaderFactory.RepositoryType;
-import org.apache.juli.logging.Log;
-import org.apache.juli.logging.LogFactory;
 
 /**
  * Bootstrap loader for Catalina.  This application constructs a class loader
@@ -104,7 +104,7 @@ public final class Bootstrap {
 
         catalinaHomeFile = homeFile;
         System.setProperty(
-                Constants.CATALINA_HOME_PROP, catalinaHomeFile.getPath());
+            Constants.CATALINA_HOME_PROP, catalinaHomeFile.getPath());
 
         // Then base
         String base = System.getProperty(Constants.CATALINA_BASE_PROP);
@@ -120,7 +120,7 @@ public final class Bootstrap {
             catalinaBaseFile = baseFile;
         }
         System.setProperty(
-                Constants.CATALINA_BASE_PROP, catalinaBaseFile.getPath());
+            Constants.CATALINA_BASE_PROP, catalinaBaseFile.getPath());
     }
 
     // -------------------------------------------------------------- Variables
@@ -138,62 +138,88 @@ public final class Bootstrap {
 
     // -------------------------------------------------------- Private Methods
 
+    /**
+     * Main method and entry point when starting Tomcat via the provided
+     * scripts.
+     *
+     * @param args Command line arguments to be processed
+     */
+    public static void main(String args[]) {
 
-    private void initClassLoaders() {
-        try {
-            commonLoader = createClassLoader("common", null);
-            if (commonLoader == null) {
-                // no config file, default to this loader - we might be in a 'single' env.
-                commonLoader = this.getClass().getClassLoader();
+        // 创建一个 Bootstrap 对象、调用它的 init 方法
+        synchronized (daemonLock) {
+            if (daemon == null) {
+                // Don't set daemon until init() has completed
+                Bootstrap bootstrap = new Bootstrap();
+                try {
+                    bootstrap.init();
+                } catch (Throwable t) {
+                    handleThrowable(t);
+                    t.printStackTrace();
+                    return;
+                }
+                daemon = bootstrap;
+            } else {
+                // When running as a service the call to stop will be on a new
+                // thread so make sure the correct class loader is used to
+                // prevent a range of class not found exceptions.
+                Thread.currentThread().setContextClassLoader(daemon.catalinaLoader);
             }
-            catalinaLoader = createClassLoader("server", commonLoader);
-            sharedLoader = createClassLoader("shared", commonLoader);
+        }
+
+        // 根据启动参数、分别调用 Bootstrap 对象不同的方法
+        try {
+            // 默认是 start
+            String command = "start";
+            if (args.length > 0) {
+                command = args[args.length - 1];
+            }
+
+            if (command.equals("startd")) {
+                args[args.length - 1] = "start";
+                daemon.load(args);
+                daemon.start();
+            } else if (command.equals("stopd")) {
+                args[args.length - 1] = "stop";
+                daemon.stop();
+            } else if (command.equals("start")) {
+                daemon.setAwait(true);
+                daemon.load(args);
+                daemon.start();
+                if (null == daemon.getServer()) {
+                    System.exit(1);
+                }
+            } else if (command.equals("stop")) {
+                daemon.stopServer(args);
+            } else if (command.equals("configtest")) {
+                daemon.load(args);
+                if (null == daemon.getServer()) {
+                    System.exit(1);
+                }
+                System.exit(0);
+            } else {
+                log.warn("Bootstrap: command \"" + command + "\" does not exist.");
+            }
         } catch (Throwable t) {
+            // Unwrap the Exception for clearer error reporting
+            if (t instanceof InvocationTargetException &&
+                t.getCause() != null) {
+                t = t.getCause();
+            }
             handleThrowable(t);
-            log.error("Class loader creation threw exception", t);
+            t.printStackTrace();
             System.exit(1);
         }
     }
 
-
-    private ClassLoader createClassLoader(String name, ClassLoader parent)
-        throws Exception {
-
-        String value = CatalinaProperties.getProperty(name + ".loader");
-        if ((value == null) || (value.equals(""))) {
-            return parent;
-        }
-
-        value = replace(value);
-
-        List<Repository> repositories = new ArrayList<>();
-
-        String[] repositoryPaths = getPaths(value);
-
-        for (String repository : repositoryPaths) {
-            // Check for a JAR URL repository
-            try {
-                @SuppressWarnings("unused")
-                URL url = new URL(repository);
-                repositories.add(new Repository(repository, RepositoryType.URL));
-                continue;
-            } catch (MalformedURLException e) {
-                // Ignore
-            }
-
-            // Local repository
-            if (repository.endsWith("*.jar")) {
-                repository = repository.substring
-                    (0, repository.length() - "*.jar".length());
-                repositories.add(new Repository(repository, RepositoryType.GLOB));
-            } else if (repository.endsWith(".jar")) {
-                repositories.add(new Repository(repository, RepositoryType.JAR));
-            } else {
-                repositories.add(new Repository(repository, RepositoryType.DIR));
-            }
-        }
-
-        return ClassLoaderFactory.createClassLoader(repositories, parent);
+    /**
+     * Obtain the name of configured home (binary) directory. Note that home and
+     * base may be the same (and are by default).
+     *
+     * @return the catalina home
+     */
+    public static String getCatalinaHome() {
+        return catalinaHomeFile.getPath();
     }
 
 
@@ -242,67 +268,25 @@ public final class Bootstrap {
         return result;
     }
 
-
     /**
-     * Initialize daemon.
-     * @throws Exception Fatal initialization error
+     * Obtain the name of the configured base (instance) directory. Note that
+     * home and base may be the same (and are by default). If this is not set
+     * the value returned by {@link #getCatalinaHome()} will be used.
+     *
+     * @return the catalina base
      */
-    public void init() throws Exception {
-
-        initClassLoaders();
-
-        Thread.currentThread().setContextClassLoader(catalinaLoader);
-
-        SecurityClassLoad.securityClassLoad(catalinaLoader);
-
-        // Load our startup class and call its process() method
-        if (log.isDebugEnabled()) {
-            log.debug("Loading startup class");
-        }
-        Class<?> startupClass = catalinaLoader.loadClass("org.apache.catalina.startup.Catalina");
-        Object startupInstance = startupClass.getConstructor().newInstance();
-
-        // Set the shared extensions class loader
-        if (log.isDebugEnabled()) {
-            log.debug("Setting startup class properties");
-        }
-        String methodName = "setParentClassLoader";
-        Class<?> paramTypes[] = new Class[1];
-        paramTypes[0] = Class.forName("java.lang.ClassLoader");
-        Object paramValues[] = new Object[1];
-        paramValues[0] = sharedLoader;
-        Method method =
-            startupInstance.getClass().getMethod(methodName, paramTypes);
-        method.invoke(startupInstance, paramValues);
-
-        catalinaDaemon = startupInstance;
+    public static String getCatalinaBase() {
+        return catalinaBaseFile.getPath();
     }
 
-
     /**
-     * Load daemon.
+     * Obtain the configured home (binary) directory. Note that home and
+     * base may be the same (and are by default).
+     *
+     * @return the catalina home as a file
      */
-    private void load(String[] arguments) throws Exception {
-
-        // Call the load() method
-        String methodName = "load";
-        Object param[];
-        Class<?> paramTypes[];
-        if (arguments==null || arguments.length==0) {
-            paramTypes = null;
-            param = null;
-        } else {
-            paramTypes = new Class[1];
-            paramTypes[0] = arguments.getClass();
-            param = new Object[1];
-            param[0] = arguments;
-        }
-        Method method =
-            catalinaDaemon.getClass().getMethod(methodName, paramTypes);
-        if (log.isDebugEnabled()) {
-            log.debug("Calling startup class " + method);
-        }
-        method.invoke(catalinaDaemon, param);
+    public static File getCatalinaHomeFile() {
+        return catalinaHomeFile;
     }
 
 
@@ -319,251 +303,15 @@ public final class Bootstrap {
 
     // ----------------------------------------------------------- Main Program
 
-
-    /**
-     * Load the Catalina daemon.
-     * @param arguments Initialization arguments
-     * @throws Exception Fatal initialization error
-     */
-    public void init(String[] arguments) throws Exception {
-
-        init();
-        load(arguments);
-    }
-
-
-    /**
-     * Start the Catalina daemon.
-     * @throws Exception Fatal start error
-     */
-    public void start() throws Exception {
-        if (catalinaDaemon == null) {
-            init();
-        }
-
-        Method method = catalinaDaemon.getClass().getMethod("start", (Class [])null);
-        method.invoke(catalinaDaemon, (Object [])null);
-    }
-
-
-    /**
-     * Stop the Catalina Daemon.
-     * @throws Exception Fatal stop error
-     */
-    public void stop() throws Exception {
-        Method method = catalinaDaemon.getClass().getMethod("stop", (Class []) null);
-        method.invoke(catalinaDaemon, (Object []) null);
-    }
-
-
-    /**
-     * Stop the standalone server.
-     * @throws Exception Fatal stop error
-     */
-    public void stopServer() throws Exception {
-
-        Method method =
-            catalinaDaemon.getClass().getMethod("stopServer", (Class []) null);
-        method.invoke(catalinaDaemon, (Object []) null);
-    }
-
-
-   /**
-     * Stop the standalone server.
-     * @param arguments Command line arguments
-     * @throws Exception Fatal stop error
-     */
-    public void stopServer(String[] arguments) throws Exception {
-
-        Object param[];
-        Class<?> paramTypes[];
-        if (arguments == null || arguments.length == 0) {
-            paramTypes = null;
-            param = null;
-        } else {
-            paramTypes = new Class[1];
-            paramTypes[0] = arguments.getClass();
-            param = new Object[1];
-            param[0] = arguments;
-        }
-        Method method =
-            catalinaDaemon.getClass().getMethod("stopServer", paramTypes);
-        method.invoke(catalinaDaemon, param);
-    }
-
-
-    /**
-     * Set flag.
-     * @param await <code>true</code> if the daemon should block
-     * @throws Exception Reflection error
-     */
-    public void setAwait(boolean await)
-        throws Exception {
-
-        Class<?> paramTypes[] = new Class[1];
-        paramTypes[0] = Boolean.TYPE;
-        Object paramValues[] = new Object[1];
-        paramValues[0] = Boolean.valueOf(await);
-        Method method =
-            catalinaDaemon.getClass().getMethod("setAwait", paramTypes);
-        method.invoke(catalinaDaemon, paramValues);
-    }
-
-    public boolean getAwait() throws Exception {
-        Class<?> paramTypes[] = new Class[0];
-        Object paramValues[] = new Object[0];
-        Method method =
-            catalinaDaemon.getClass().getMethod("getAwait", paramTypes);
-        Boolean b=(Boolean)method.invoke(catalinaDaemon, paramValues);
-        return b.booleanValue();
-    }
-
-
-    /**
-     * Destroy the Catalina Daemon.
-     */
-    public void destroy() {
-
-        // FIXME
-
-    }
-
-
-    /**
-     * Main method and entry point when starting Tomcat via the provided
-     * scripts.
-     *
-     * @param args Command line arguments to be processed
-     */
-    public static void main(String args[]) {
-
-        synchronized (daemonLock) {
-            if (daemon == null) {
-                // Don't set daemon until init() has completed
-                Bootstrap bootstrap = new Bootstrap();
-                try {
-                    bootstrap.init();
-                } catch (Throwable t) {
-                    handleThrowable(t);
-                    t.printStackTrace();
-                    return;
-                }
-                daemon = bootstrap;
-            } else {
-                // When running as a service the call to stop will be on a new
-                // thread so make sure the correct class loader is used to
-                // prevent a range of class not found exceptions.
-                Thread.currentThread().setContextClassLoader(daemon.catalinaLoader);
-            }
-        }
-
-        try {
-            String command = "start";
-            if (args.length > 0) {
-                command = args[args.length - 1];
-            }
-
-            if (command.equals("startd")) {
-                args[args.length - 1] = "start";
-                daemon.load(args);
-                daemon.start();
-            } else if (command.equals("stopd")) {
-                args[args.length - 1] = "stop";
-                daemon.stop();
-            } else if (command.equals("start")) {
-                daemon.setAwait(true);
-                daemon.load(args);
-                daemon.start();
-                if (null == daemon.getServer()) {
-                    System.exit(1);
-                }
-            } else if (command.equals("stop")) {
-                daemon.stopServer(args);
-            } else if (command.equals("configtest")) {
-                daemon.load(args);
-                if (null == daemon.getServer()) {
-                    System.exit(1);
-                }
-                System.exit(0);
-            } else {
-                log.warn("Bootstrap: command \"" + command + "\" does not exist.");
-            }
-        } catch (Throwable t) {
-            // Unwrap the Exception for clearer error reporting
-            if (t instanceof InvocationTargetException &&
-                    t.getCause() != null) {
-                t = t.getCause();
-            }
-            handleThrowable(t);
-            t.printStackTrace();
-            System.exit(1);
-        }
-    }
-
-
-    /**
-     * Obtain the name of configured home (binary) directory. Note that home and
-     * base may be the same (and are by default).
-     * @return the catalina home
-     */
-    public static String getCatalinaHome() {
-        return catalinaHomeFile.getPath();
-    }
-
-
-    /**
-     * Obtain the name of the configured base (instance) directory. Note that
-     * home and base may be the same (and are by default). If this is not set
-     * the value returned by {@link #getCatalinaHome()} will be used.
-     * @return the catalina base
-     */
-    public static String getCatalinaBase() {
-        return catalinaBaseFile.getPath();
-    }
-
-
-    /**
-     * Obtain the configured home (binary) directory. Note that home and
-     * base may be the same (and are by default).
-     * @return the catalina home as a file
-     */
-    public static File getCatalinaHomeFile() {
-        return catalinaHomeFile;
-    }
-
-
     /**
      * Obtain the configured base (instance) directory. Note that
      * home and base may be the same (and are by default). If this is not set
      * the value returned by {@link #getCatalinaHomeFile()} will be used.
+     *
      * @return the catalina base as a file
      */
     public static File getCatalinaBaseFile() {
         return catalinaBaseFile;
-    }
-
-
-    // Copied from ExceptionUtils since that class is not visible during start
-    static void handleThrowable(Throwable t) {
-        if (t instanceof ThreadDeath) {
-            throw (ThreadDeath) t;
-        }
-        if (t instanceof StackOverflowError) {
-            // Swallow silently - it should be recoverable
-            return;
-        }
-        if (t instanceof VirtualMachineError) {
-            throw (VirtualMachineError) t;
-        }
-        // All other instances of Throwable will be silently swallowed
-    }
-
-    // Copied from ExceptionUtils so that there is no dependency on utils
-    static Throwable unwrapInvocationTargetException(Throwable t) {
-        if (t instanceof InvocationTargetException && t.getCause() != null) {
-            return t.getCause();
-        }
-        return t;
     }
 
     // Protected for unit testing
@@ -594,7 +342,7 @@ public final class Bootstrap {
                 // Too early to use standard i18n support. The class path hasn't
                 // been configured.
                 throw new IllegalArgumentException(
-                        "The double quote [\"] character can only be used to quote paths. It must " +
+                    "The double quote [\"] character can only be used to quote paths. It must " +
                         "not appear in a path. This loader path is not valid: [" + value + "]");
             } else {
                 // Not quoted - NO-OP
@@ -603,5 +351,273 @@ public final class Bootstrap {
             result.add(path);
         }
         return result.toArray(new String[0]);
+    }
+
+    private void initClassLoaders() {
+        try {
+            // commonLoader 初始化
+            commonLoader = createClassLoader("common", null);
+            if (commonLoader == null) {
+                // no config file, default to this loader - we might be in a 'single' env.
+                commonLoader = this.getClass().getClassLoader();
+            }
+//            catalinaLoader 初始化、父 classLoader 是 commonLoader
+            catalinaLoader = createClassLoader("server", commonLoader);
+            // sharedLoader 初始化
+            sharedLoader = createClassLoader("shared", commonLoader);
+        } catch (Throwable t) {
+            handleThrowable(t);
+            log.error("Class loader creation threw exception", t);
+            System.exit(1);
+        }
+    }
+
+    /**
+     * 从 catalina.property 文件里找到 common.load、shared.loader、server.loader 对应的值
+     * 然后构造成 Repository 列表传入到 ClassLoaderFactory.createClassLoader 中
+     * ClassLoaderFactory.createClassLoader 返回到就是 URLLoader
+     * 而 Repository 列表则是这个 URLLoader 可以加载到类到路径
+     * <p>
+     * shared.loader、server.loader 是没有值到、那么 createClassLoader 则会返回 parent ClassLoader
+     */
+    private ClassLoader createClassLoader(String name, ClassLoader parent)
+        throws Exception {
+
+        String value = CatalinaProperties.getProperty(name + ".loader");
+        if ((value == null) || (value.equals(""))) {
+            return parent;
+        }
+
+        value = replace(value);
+
+        List<Repository> repositories = new ArrayList<>();
+
+        String[] repositoryPaths = getPaths(value);
+
+        for (String repository : repositoryPaths) {
+            // Check for a JAR URL repository
+            try {
+                @SuppressWarnings("unused")
+                URL url = new URL(repository);
+                repositories.add(new Repository(repository, RepositoryType.URL));
+                continue;
+            } catch (MalformedURLException e) {
+                // Ignore
+            }
+
+            // Local repository
+            if (repository.endsWith("*.jar")) {
+                repository = repository.substring
+                    (0, repository.length() - "*.jar".length());
+                repositories.add(new Repository(repository, RepositoryType.GLOB));
+            } else if (repository.endsWith(".jar")) {
+                repositories.add(new Repository(repository, RepositoryType.JAR));
+            } else {
+                repositories.add(new Repository(repository, RepositoryType.DIR));
+            }
+        }
+
+        return ClassLoaderFactory.createClassLoader(repositories, parent);
+    }
+
+    /**
+     * 初始化守护进程
+     * Initialize daemon.
+     *
+     * @throws Exception Fatal initialization error
+     */
+    public void init() throws Exception {
+
+        // 初始化 classloader 包括 CatalinaLoader
+        initClassLoaders();
+
+        // 设置当前线程的 contextClassLoader 为 catalinaLoader
+        Thread.currentThread().setContextClassLoader(catalinaLoader);
+
+        SecurityClassLoad.securityClassLoad(catalinaLoader);
+
+        // Load our startup class and call its process() method
+        if (log.isDebugEnabled()) {
+            log.debug("Loading startup class");
+        }
+        // 通过 CatalinaLoader 加载 Catalina、并实例化它
+        Class<?> startupClass = catalinaLoader.loadClass("org.apache.catalina.startup.Catalina");
+        Object startupInstance = startupClass.getConstructor().newInstance();
+
+        // Set the shared extensions class loader
+        if (log.isDebugEnabled()) {
+            log.debug("Setting startup class properties");
+        }
+        // 通过反射调用 setParentClassLoader 方法
+        String methodName = "setParentClassLoader";
+        Class<?> paramTypes[] = new Class[1];
+        paramTypes[0] = Class.forName("java.lang.ClassLoader");
+        Object paramValues[] = new Object[1];
+        paramValues[0] = sharedLoader;
+        Method method =
+            startupInstance.getClass().getMethod(methodName, paramTypes);
+        method.invoke(startupInstance, paramValues);
+
+        catalinaDaemon = startupInstance;
+    }
+
+    /**
+     * Load daemon.
+     */
+    private void load(String[] arguments) throws Exception {
+
+        // Call the load() method
+        String methodName = "load";
+        Object param[];
+        Class<?> paramTypes[];
+        if (arguments == null || arguments.length == 0) {
+            paramTypes = null;
+            param = null;
+        } else {
+            paramTypes = new Class[1];
+            paramTypes[0] = arguments.getClass();
+            param = new Object[1];
+            param[0] = arguments;
+        }
+        Method method =
+            catalinaDaemon.getClass().getMethod(methodName, paramTypes);
+        if (log.isDebugEnabled()) {
+            log.debug("Calling startup class " + method);
+        }
+        // 反射调用
+        method.invoke(catalinaDaemon, param);
+    }
+
+    /**
+     * Load the Catalina daemon.
+     *
+     * @param arguments Initialization arguments
+     * @throws Exception Fatal initialization error
+     */
+    public void init(String[] arguments) throws Exception {
+
+        init();
+        load(arguments);
+    }
+
+
+    /**
+     * Destroy the Catalina Daemon.
+     */
+    public void destroy() {
+
+        // FIXME
+
+    }
+
+    /**
+     * Start the Catalina daemon.
+     *
+     * @throws Exception Fatal start error
+     */
+    public void start() throws Exception {
+        if (catalinaDaemon == null) {
+            init();
+        }
+
+        Method method = catalinaDaemon.getClass().getMethod("start", (Class[]) null);
+        method.invoke(catalinaDaemon, (Object[]) null);
+    }
+
+    /**
+     * Stop the Catalina Daemon.
+     *
+     * @throws Exception Fatal stop error
+     */
+    public void stop() throws Exception {
+        Method method = catalinaDaemon.getClass().getMethod("stop", (Class[]) null);
+        method.invoke(catalinaDaemon, (Object[]) null);
+    }
+
+    /**
+     * Stop the standalone server.
+     *
+     * @throws Exception Fatal stop error
+     */
+    public void stopServer() throws Exception {
+
+        Method method =
+            catalinaDaemon.getClass().getMethod("stopServer", (Class[]) null);
+        method.invoke(catalinaDaemon, (Object[]) null);
+    }
+
+    /**
+     * Stop the standalone server.
+     *
+     * @param arguments Command line arguments
+     * @throws Exception Fatal stop error
+     */
+    public void stopServer(String[] arguments) throws Exception {
+
+        Object param[];
+        Class<?> paramTypes[];
+        if (arguments == null || arguments.length == 0) {
+            paramTypes = null;
+            param = null;
+        } else {
+            paramTypes = new Class[1];
+            paramTypes[0] = arguments.getClass();
+            param = new Object[1];
+            param[0] = arguments;
+        }
+        Method method =
+            catalinaDaemon.getClass().getMethod("stopServer", paramTypes);
+        method.invoke(catalinaDaemon, param);
+    }
+
+    public boolean getAwait() throws Exception {
+        Class<?> paramTypes[] = new Class[0];
+        Object paramValues[] = new Object[0];
+        Method method =
+            catalinaDaemon.getClass().getMethod("getAwait", paramTypes);
+        Boolean b = (Boolean) method.invoke(catalinaDaemon, paramValues);
+        return b.booleanValue();
+    }
+
+
+    // Copied from ExceptionUtils since that class is not visible during start
+    static void handleThrowable(Throwable t) {
+        if (t instanceof ThreadDeath) {
+            throw (ThreadDeath) t;
+        }
+        if (t instanceof StackOverflowError) {
+            // Swallow silently - it should be recoverable
+            return;
+        }
+        if (t instanceof VirtualMachineError) {
+            throw (VirtualMachineError) t;
+        }
+        // All other instances of Throwable will be silently swallowed
+    }
+
+    // Copied from ExceptionUtils so that there is no dependency on utils
+    static Throwable unwrapInvocationTargetException(Throwable t) {
+        if (t instanceof InvocationTargetException && t.getCause() != null) {
+            return t.getCause();
+        }
+        return t;
+    }
+
+    /**
+     * Set flag.
+     *
+     * @param await <code>true</code> if the daemon should block
+     * @throws Exception Reflection error
+     */
+    public void setAwait(boolean await)
+        throws Exception {
+
+        Class<?> paramTypes[] = new Class[1];
+        paramTypes[0] = Boolean.TYPE;
+        Object paramValues[] = new Object[1];
+        paramValues[0] = Boolean.valueOf(await);
+        Method method =
+            catalinaDaemon.getClass().getMethod("setAwait", paramTypes);
+        method.invoke(catalinaDaemon, paramValues);
     }
 }

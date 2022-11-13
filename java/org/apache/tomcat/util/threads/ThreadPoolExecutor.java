@@ -16,29 +16,24 @@
  */
 package org.apache.tomcat.util.threads;
 
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.RejectedExecutionHandler;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.TimeUnit;
+import org.apache.tomcat.util.res.StringManager;
+
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-
-import org.apache.tomcat.util.res.StringManager;
 
 /**
  * Same as a java.util.concurrent.ThreadPoolExecutor but implements a much more efficient
  * {@link #getSubmittedCount()} method, to be used to properly handle the work queue.
  * If a RejectedExecutionHandler is not specified a default one will be configured
  * and that one will always throw a RejectedExecutionException
- *
  */
 public class ThreadPoolExecutor extends java.util.concurrent.ThreadPoolExecutor {
     /**
      * The string manager for this package.
      */
     protected static final StringManager sm = StringManager
-            .getManager("org.apache.tomcat.util.threads.res");
+        .getManager("org.apache.tomcat.util.threads.res");
 
     /**
      * The number of tasks submitted but not yet finished. This includes tasks
@@ -47,17 +42,22 @@ public class ThreadPoolExecutor extends java.util.concurrent.ThreadPoolExecutor 
      * This number is always greater or equal to {@link #getActiveCount()}.
      */
     private final AtomicInteger submittedCount = new AtomicInteger(0);
+    /**
+     * 上次上下文挺停止的时间
+     */
     private final AtomicLong lastContextStoppedTime = new AtomicLong(0L);
 
     /**
      * Most recent time in ms when a thread decided to kill itself to avoid
      * potential memory leaks. Useful to throttle the rate of renewals of
      * threads.
+     * 池中的线程池、因为避免潜在的内存泄漏、自杀的时间点
      */
     private final AtomicLong lastTimeThreadKilledItself = new AtomicLong(0L);
 
     /**
      * Delay in ms between 2 threads being renewed. If negative, do not renew threads.
+     * //为了避免在上下文停止之后，所有的线程在同一时间段被更新，所以进行线程的延迟操作
      */
     private long threadRenewalDelay = Constants.DEFAULT_THREAD_RENEWAL_DELAY;
 
@@ -67,7 +67,7 @@ public class ThreadPoolExecutor extends java.util.concurrent.ThreadPoolExecutor 
     }
 
     public ThreadPoolExecutor(int corePoolSize, int maximumPoolSize, long keepAliveTime, TimeUnit unit, BlockingQueue<Runnable> workQueue, ThreadFactory threadFactory,
-            RejectedExecutionHandler handler) {
+                              RejectedExecutionHandler handler) {
         super(corePoolSize, maximumPoolSize, keepAliveTime, unit, workQueue, threadFactory, handler);
         prestartAllCoreThreads();
     }
@@ -114,12 +114,12 @@ public class ThreadPoolExecutor extends java.util.concurrent.ThreadPoolExecutor 
             long lastTime = lastTimeThreadKilledItself.longValue();
             if (lastTime + threadRenewalDelay < System.currentTimeMillis()) {
                 if (lastTimeThreadKilledItself.compareAndSet(lastTime,
-                        System.currentTimeMillis() + 1)) {
+                    System.currentTimeMillis() + 1)) {
                     // OK, it's really time to dispose of this thread
 
                     final String msg = sm.getString(
-                                    "threadPoolExecutor.threadStoppedToAvoidPotentialLeak",
-                                    Thread.currentThread().getName());
+                        "threadPoolExecutor.threadStoppedToAvoidPotentialLeak",
+                        Thread.currentThread().getName());
 
                     throw new StopPooledThreadException(msg);
                 }
@@ -128,11 +128,11 @@ public class ThreadPoolExecutor extends java.util.concurrent.ThreadPoolExecutor 
     }
 
     protected boolean currentThreadShouldBeStopped() {
-        if (threadRenewalDelay >= 0
-            && Thread.currentThread() instanceof TaskThread) {
+
+        if (threadRenewalDelay >= 0 && Thread.currentThread() instanceof TaskThread) {
+
             TaskThread currentTaskThread = (TaskThread) Thread.currentThread();
-            if (currentTaskThread.getCreationTime() <
-                    this.lastContextStoppedTime.longValue()) {
+            if (currentTaskThread.getCreationTime() < this.lastContextStoppedTime.longValue()) {
                 return true;
             }
         }
@@ -148,7 +148,7 @@ public class ThreadPoolExecutor extends java.util.concurrent.ThreadPoolExecutor 
      */
     @Override
     public void execute(Runnable command) {
-        execute(command,0,TimeUnit.MILLISECONDS);
+        execute(command, 0, TimeUnit.MILLISECONDS);
     }
 
     /**
@@ -162,21 +162,25 @@ public class ThreadPoolExecutor extends java.util.concurrent.ThreadPoolExecutor 
      *
      * @param command the runnable task
      * @param timeout A timeout for the completion of the task
-     * @param unit The timeout time unit
+     * @param unit    The timeout time unit
      * @throws RejectedExecutionException if this task cannot be
-     * accepted for execution - the queue is full
-     * @throws NullPointerException if command or unit is null
+     *                                    accepted for execution - the queue is full
+     * @throws NullPointerException       if command or unit is null
      */
     public void execute(Runnable command, long timeout, TimeUnit unit) {
+        // 记录提交的任务数
         submittedCount.incrementAndGet();
         try {
+            // 原生线程池池执行
             super.execute(command);
         } catch (RejectedExecutionException rx) {
             if (super.getQueue() instanceof TaskQueue) {
-                final TaskQueue queue = (TaskQueue)super.getQueue();
+                final TaskQueue queue = (TaskQueue) super.getQueue();
                 try {
+                    // 尝试往队列里面塞
                     if (!queue.force(command, timeout, unit)) {
                         submittedCount.decrementAndGet();
+                        // 失败了没办法
                         throw new RejectedExecutionException(sm.getString("threadPoolExecutor.queueFull"));
                     }
                 } catch (InterruptedException x) {
@@ -197,7 +201,7 @@ public class ThreadPoolExecutor extends java.util.concurrent.ThreadPoolExecutor 
         // save the current pool parameters to restore them later
         int savedCorePoolSize = this.getCorePoolSize();
         TaskQueue taskQueue =
-                getQueue() instanceof TaskQueue ? (TaskQueue) getQueue() : null;
+            getQueue() instanceof TaskQueue ? (TaskQueue) getQueue() : null;
         if (taskQueue != null) {
             // note by slaurent : quite oddly threadPoolExecutor.setCorePoolSize
             // checks that queue.remainingCapacity()==0. I did not understand
@@ -223,7 +227,7 @@ public class ThreadPoolExecutor extends java.util.concurrent.ThreadPoolExecutor 
     private static class RejectHandler implements RejectedExecutionHandler {
         @Override
         public void rejectedExecution(Runnable r,
-                java.util.concurrent.ThreadPoolExecutor executor) {
+                                      java.util.concurrent.ThreadPoolExecutor executor) {
             throw new RejectedExecutionException();
         }
 
